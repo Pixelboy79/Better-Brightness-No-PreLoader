@@ -37,8 +37,8 @@ If you prefer to compile locally, ensure you have the Android NDK (r26b recommen
 ```bash
 mkdir build && cd build
 cmake .. -DCMAKE_TOOLCHAIN_FILE=/path/to/your/android-ndk/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-21 -DCMAKE_BUILD_TYPE=Release
-make```
-
+make
+```
 📜 Credits & Copyright
 © 2026 Pixelboypro — Standalone Snail Method Conversion, Levi Launcher/Preloader Dependency Removal, and Native C++ Memory Patching Rewrite.
 
