@@ -39,7 +39,8 @@ mkdir build && cd build
 cmake .. -DCMAKE_TOOLCHAIN_FILE=/path/to/your/android-ndk/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-21 -DCMAKE_BUILD_TYPE=Release
 make
 ```
-#📜 Credits & Copyright
-© 2026 Pixelboypro — Standalone Snail Method Conversion, Levi Launcher/Preloader Dependency Removal, and Native C++ Memory Patching Rewrite.
+## 📜 Credits & Copyright
 
-Original concept and AArch64 gamma memory signatures created by RadiantByte.
+**© 2026 Pixelboypro** — *Standalone Snail Method Conversion, Levi Launcher/Preloader Dependency Removal, and Native C++ Memory Patching Rewrite.*
+
+* Original concept and AArch64 gamma memory signatures created by **RadiantByte**.
