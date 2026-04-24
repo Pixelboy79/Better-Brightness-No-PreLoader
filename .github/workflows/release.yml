@@ -1,0 +1,51 @@
+name: Publish Release
+
+# This allows you to run the workflow manually from the Actions tab
+on:
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: 'Release Version (e.g., v1.0, v1.1)'
+        required: true
+        default: 'v1.0'
+
+jobs:
+  build-and-release:
+    strategy:
+      matrix:
+        target: 
+          - arm64-v8a
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Android NDK
+      uses: nttld/setup-ndk@v1
+      id: setup-ndk
+      with:
+        ndk-version: r26b
+        
+    - name: Configure CMake
+      run: |
+        mkdir build
+        cd build
+        cmake .. -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake -DANDROID_ABI=${{ matrix.target }} -DANDROID_PLATFORM=android-21 -DCMAKE_BUILD_TYPE=Release
+        
+    - name: Build
+      run: |
+        cd build
+        make
+        
+    - name: Upload to GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: build/libBetterBrightness.so
+        name: Better Brightness ${{ github.event.inputs.version_tag }}
+        tag_name: ${{ github.event.inputs.version_tag }}
+        body: "Standalone Snail Method version of Better Brightness. No Levi Launcher required."
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
