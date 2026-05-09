@@ -5,7 +5,11 @@ project(BetterBrightness)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 1. Fetch Dobby directly from GitHub
+# 1. FIX FOR ANDROID NDK ASM ERROR: Force Position Independent Code
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(DOBBY_GENERATE_SHARED OFF CACHE BOOL "" FORCE)
+
+# 2. Fetch Dobby directly from GitHub
 include(FetchContent)
 FetchContent_Declare(
     dobby
@@ -14,18 +18,18 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(dobby)
 
-# 2. Find the Android logging library (for LOGI and LOGE)
+# 3. Find the Android logging library
 find_library(log-lib log)
 
-# 3. Create your BetterBrightness .so file
+# 4. Create your BetterBrightness .so file
 add_library(BetterBrightness SHARED src/main.cpp)
 
-# 4. Include directories (so CMake can find dobby.h)
+# 5. Include directories (so CMake can find dobby.h)
 target_include_directories(BetterBrightness PRIVATE 
     ${dobby_SOURCE_DIR}/include
 )
 
-# 5. Link Dobby and the log library to your mod
+# 6. Link Dobby and the log library
 target_link_libraries(BetterBrightness
     PRIVATE
     dobby
