@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <filesystem>
 #include <fstream>
+#include <fcntl.h> // Required for opening memory files
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "BetterBrightness", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "BetterBrightness", __VA_ARGS__)
@@ -25,9 +26,8 @@ constexpr uint32_t SCVTF_S2_W8 = 0x1E220102;
 constexpr ptrdiff_t OFFSET_MOVK = 12;
 constexpr ptrdiff_t OFFSET_FMOV = 16;
 
-// Function to write a log file directly to the phone's storage
 void WriteDebugLog(const std::string& message) {
-    std::string path = "/storage/emulated/0/Android/data/com.mojang.minecraftpe.nv/files/mods/BetterBrightness_Log.txt";
+    std::string path = "/storage/emulated/0/Android/data/com.mojang.minecraftpe/files/mods/BetterBrightness_Log.txt";
     std::error_code ec;
     fs::create_directories(fs::path(path).parent_path(), ec);
     std::ofstream logFile(path, std::ios::app);
@@ -37,24 +37,26 @@ void WriteDebugLog(const std::string& message) {
     }
 }
 
-// Function to safely overwrite assembly instructions
+// THE KERNEL BYPASS: Writing directly to the memory file
 static bool PatchMemory(void* addr, uint32_t insn) {
-    uintptr_t page_start = (uintptr_t)addr & ~(uintptr_t)4095;
-    size_t    page_size  = 4096; 
-    
-    if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE) != 0) {
-        WriteDebugLog("ERROR: mprotect WRITE denied by Android at " + std::to_string((uintptr_t)addr));
+    // Open the raw memory of the Minecraft app
+    int fd = open("/proc/self/mem", O_RDWR);
+    if (fd < 0) {
+        WriteDebugLog("ERROR: Could not open /proc/self/mem to bypass Android security.");
         return false;
     }
     
-    memcpy(addr, &insn, sizeof(insn));
+    // Write our new assembly instructions directly to the exact memory address
+    ssize_t written = pwrite(fd, &insn, sizeof(insn), (off_t)addr);
+    close(fd);
+    
+    if (written != sizeof(insn)) {
+        WriteDebugLog("ERROR: pwrite failed to overwrite memory at " + std::to_string((uintptr_t)addr));
+        return false;
+    }
+    
+    // Flush the CPU cache so the game reads the new limits
     __builtin___clear_cache((char*)addr, (char*)addr + sizeof(insn));
-    
-    if (mprotect((void*)page_start, page_size, PROT_READ | PROT_EXEC) != 0) {
-        WriteDebugLog("ERROR: mprotect EXEC denied by Android at " + std::to_string((uintptr_t)addr));
-        return false;
-    }
-    
     return true;
 }
 
@@ -101,8 +103,7 @@ static uintptr_t ResolveSignature(const char* sig) {
 }
 
 void* InjectionThread(void* arg) {
-    // Clear old log file
-    std::string path = "/storage/emulated/0/Android/data/com.mojang.minecraftpe.nv/files/mods/BetterBrightness_Log.txt";
+    std::string path = "/storage/emulated/0/Android/data/com.mojang.minecraftpe/files/mods/BetterBrightness_Log.txt";
     std::remove(path.c_str());
     WriteDebugLog("--- BetterBrightness Booted ---");
 
@@ -133,9 +134,10 @@ void* InjectionThread(void* arg) {
             if (*reinterpret_cast<uint32_t*>(base + OFFSET_FMOV) != 0x1E2E1002) {
                 WriteDebugLog("FATAL: Verification failed! Assembly instruction at offset 16 did not match.");
             } else {
+                // Apply the Kernel memory bypass
                 if (PatchMemory(reinterpret_cast<void*>(base + OFFSET_MOVK), MOV_W8_10) &&
                     PatchMemory(reinterpret_cast<void*>(base + OFFSET_FMOV), SCVTF_S2_W8)) {
-                    WriteDebugLog("SUCCESS: Patched Gamma limits perfectly! Night vision should be active.");
+                    WriteDebugLog("SUCCESS: Patched Gamma limits perfectly using /proc/self/mem bypass!");
                     patchApplied = true;
                 }
             }
@@ -145,7 +147,7 @@ void* InjectionThread(void* arg) {
     }
 
     if (!patchApplied) {
-        WriteDebugLog("FATAL: Could not find BetterBrightness pattern in memory after 100 attempts.");
+        WriteDebugLog("FATAL: Could not apply memory patch.");
     }
 
     return nullptr;
