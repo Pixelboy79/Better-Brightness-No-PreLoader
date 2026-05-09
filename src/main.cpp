@@ -27,7 +27,7 @@ constexpr ptrdiff_t OFFSET_FMOV = 16;
 
 // Function to write a log file directly to the phone's storage
 void WriteDebugLog(const std::string& message) {
-    std::string path = "/storage/emulated/0/Android/data/com.mojang.minecraftpe/files/mods/BetterBrightness_Log.txt";
+    std::string path = "/storage/emulated/0/Android/data/com.mojang.minecraftpe.nv/files/mods/BetterBrightness_Log.txt";
     std::error_code ec;
     fs::create_directories(fs::path(path).parent_path(), ec);
     std::ofstream logFile(path, std::ios::app);
