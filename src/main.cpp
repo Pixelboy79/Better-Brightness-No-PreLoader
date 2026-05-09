@@ -1,23 +1,47 @@
-#include <pthread.h>
-#include <unistd.h>
-#include <android/log.h>
+#include <cstdint>
+#include <cstring>
 #include <sys/mman.h>
 #include <vector>
 #include <string>
+#include <pthread.h>
+#include <unistd.h>
+#include <android/log.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "BetterBrightness", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "BetterBrightness", __VA_ARGS__)
 
-const char* GFX_GAMMA_SIGNATURE = 
-    "CA 92 06 F8 29 01 40 F9 C8 E2 06 F8 48 02 80 52 "
-    "A8 03 16 38 28 0C 80 52 BF E3 1A 38 C9 92 02 F8 "
-    "C8 12 03 78 E8 4D 82 52 01 E4 00 2F 00 10 2C 1E "
-    "68 50 A7 72 02 10 2E 1E";
+// --- 1.26.20 RenderDragon Gamma Signature ---
+static const char* GFX_GAMMA_SIGNATURE = "? ? ? 52 ? ? ? 2F ? ? ? 1E ? ? ? 72 ? ? ? 1E ? ? ? D1 03 01 27 1E ? ? ? D1 E0 03 15 AA ? ? ? 52 ? ? ? 52";
 
-const uint32_t MOV_W8_10 = 0x52800148;
-const uint32_t SCVTF_S2_W8 = 0x1E220102;
-const uint32_t FMOV_S2_1_0 = 0x1E2E1002;
+constexpr uint32_t MOV_W8_10   = 0x52800148;
+constexpr uint32_t SCVTF_S2_W8 = 0x1E220102;
 
+constexpr ptrdiff_t OFFSET_MOVK = 12;
+constexpr ptrdiff_t OFFSET_FMOV = 16;
+
+// Function to safely overwrite assembly instructions in memory
+static bool PatchMemory(void* addr, uint32_t insn) {
+    uintptr_t page_start = (uintptr_t)addr & ~(uintptr_t)4095;
+    size_t    page_size  = 4096; // Standard Android page size
+    
+    // Unlock the memory page
+    if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        LOGE("mprotect failed to unprotect memory at %p", addr);
+        return false;
+    }
+    
+    // Inject the new instructions
+    memcpy(addr, &insn, sizeof(insn));
+    __builtin___clear_cache((char*)addr, (char*)addr + sizeof(insn));
+    
+    // Lock the memory page back up
+    mprotect((void*)page_start, page_size, PROT_READ | PROT_EXEC);
+    return true;
+}
+
+// Standalone memory scanner
 static uintptr_t ResolveSignature(const char* sig) {
     std::vector<int> pattern;
     const char* p = sig;
@@ -60,8 +84,9 @@ static uintptr_t ResolveSignature(const char* sig) {
     return 0;
 }
 
+// Background Turbo-Thread
 void* InjectionThread(void* arg) {
-    LOGI("BetterBrightness thread started. Waiting for libminecraftpe.so...");
+    LOGI("BetterBrightness Turbo Thread started.");
 
     bool isLoaded = false;
     while (!isLoaded) {
@@ -76,49 +101,37 @@ void* InjectionThread(void* arg) {
             }
             fclose(fp);
         }
-        if (!isLoaded) usleep(500000); 
+        if (!isLoaded) usleep(10000); 
     }
 
-    LOGI("libminecraftpe.so is mapped! Scanning for gamma signature...");
+    LOGI("libminecraftpe.so mapped! Scanning memory instantly...");
 
     bool patchApplied = false;
-    for (int attempts = 1; attempts <= 40; attempts++) {
-        uintptr_t base_addr = ResolveSignature(GFX_GAMMA_SIGNATURE);
-        if (base_addr != 0) {
-            LOGI("Found Gamma signature! Applying memory patches...");
+    for (int attempts = 1; attempts <= 100; attempts++) {
+        uintptr_t base = ResolveSignature(GFX_GAMMA_SIGNATURE);
+        if (base != 0) {
+            LOGI("SUCCESS: Found Gamma signature at %lx", base);
             
-            uint32_t* fmov_addr = (uint32_t*)(base_addr + 52);
-            uint32_t* movk_addr = (uint32_t*)(base_addr + 48);
-
-            if (*fmov_addr != FMOV_S2_1_0) {
-                LOGE("Instruction mismatch! FMOV not found. Signature might be outdated.");
-                break;
+            // Verify we are patching the correct instructions
+            if (*reinterpret_cast<uint32_t*>(base + OFFSET_FMOV) != 0x1E2E1002) {
+                LOGE("Verification failed: unexpected assembly instruction. Are you on 1.26.20?");
+            } else {
+                // Apply the Gamma Unlocks
+                if (PatchMemory(reinterpret_cast<void*>(base + OFFSET_MOVK), MOV_W8_10) &&
+                    PatchMemory(reinterpret_cast<void*>(base + OFFSET_FMOV), SCVTF_S2_W8)) {
+                    LOGI("SUCCESS: Patched Gamma limits! Night vision active.");
+                    patchApplied = true;
+                } else {
+                    LOGE("FATAL: Failed to patch memory via mprotect.");
+                }
             }
-
-            long page_size = sysconf(_SC_PAGE_SIZE);
-
-            // Unlock memory protection for the instructions
-            uintptr_t page_start1 = ((uintptr_t)movk_addr) & ~(page_size - 1);
-            mprotect((void*)page_start1, page_size, PROT_READ | PROT_WRITE | PROT_EXEC);
-            *movk_addr = MOV_W8_10; 
-
-            uintptr_t page_start2 = ((uintptr_t)fmov_addr) & ~(page_size - 1);
-            mprotect((void*)page_start2, page_size, PROT_READ | PROT_WRITE | PROT_EXEC);
-            *fmov_addr = SCVTF_S2_W8; 
-            
-            // Flush the instruction cache to ensure the CPU executes the new instructions
-            __builtin___clear_cache((char*)movk_addr, (char*)(movk_addr + 1));
-            __builtin___clear_cache((char*)fmov_addr, (char*)(fmov_addr + 1));
-
-            LOGI("Better Brightness patch applied successfully! No Preloader required.");
-            patchApplied = true;
-            break;
+            break; 
         }
-        sleep(1); 
+        usleep(50000); 
     }
 
     if (!patchApplied) {
-        LOGE("Failed to find BetterBrightness signature after 40 attempts.");
+        LOGE("FATAL: Could not find BetterBrightness pattern in memory.");
     }
 
     return nullptr;
