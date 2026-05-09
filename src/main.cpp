@@ -8,9 +8,13 @@
 #include <android/log.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <filesystem>
+#include <fstream>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "BetterBrightness", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "BetterBrightness", __VA_ARGS__)
+
+namespace fs = std::filesystem;
 
 // --- 1.26.20 RenderDragon Gamma Signature ---
 static const char* GFX_GAMMA_SIGNATURE = "? ? ? 52 ? ? ? 2F ? ? ? 1E ? ? ? 72 ? ? ? 1E ? ? ? D1 03 01 27 1E ? ? ? D1 E0 03 15 AA ? ? ? 52 ? ? ? 52";
@@ -21,31 +25,39 @@ constexpr uint32_t SCVTF_S2_W8 = 0x1E220102;
 constexpr ptrdiff_t OFFSET_MOVK = 12;
 constexpr ptrdiff_t OFFSET_FMOV = 16;
 
-// Function to safely overwrite assembly instructions (W^X Compliant)
+// Function to write a log file directly to the phone's storage
+void WriteDebugLog(const std::string& message) {
+    std::string path = "/storage/emulated/0/Android/data/com.mojang.minecraftpe/files/mods/BetterBrightness_Log.txt";
+    std::error_code ec;
+    fs::create_directories(fs::path(path).parent_path(), ec);
+    std::ofstream logFile(path, std::ios::app);
+    if (logFile.is_open()) {
+        logFile << message << "\n";
+        logFile.close();
+    }
+}
+
+// Function to safely overwrite assembly instructions
 static bool PatchMemory(void* addr, uint32_t insn) {
     uintptr_t page_start = (uintptr_t)addr & ~(uintptr_t)4095;
-    size_t    page_size  = 4096; // Standard Android page size
+    size_t    page_size  = 4096; 
     
-    // 1. Give ourselves WRITE permission (but remove EXEC to bypass Android security)
     if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE) != 0) {
-        LOGE("mprotect WRITE failed at %p", addr);
+        WriteDebugLog("ERROR: mprotect WRITE denied by Android at " + std::to_string((uintptr_t)addr));
         return false;
     }
     
-    // 2. Inject the new instructions
     memcpy(addr, &insn, sizeof(insn));
     __builtin___clear_cache((char*)addr, (char*)addr + sizeof(insn));
     
-    // 3. Remove WRITE and restore EXEC permission so the game can run it
     if (mprotect((void*)page_start, page_size, PROT_READ | PROT_EXEC) != 0) {
-        LOGE("mprotect EXEC failed at %p", addr);
+        WriteDebugLog("ERROR: mprotect EXEC denied by Android at " + std::to_string((uintptr_t)addr));
         return false;
     }
     
     return true;
 }
 
-// Standalone memory scanner
 static uintptr_t ResolveSignature(const char* sig) {
     std::vector<int> pattern;
     const char* p = sig;
@@ -88,9 +100,11 @@ static uintptr_t ResolveSignature(const char* sig) {
     return 0;
 }
 
-// Background Turbo-Thread
 void* InjectionThread(void* arg) {
-    LOGI("BetterBrightness Turbo Thread started.");
+    // Clear old log file
+    std::string path = "/storage/emulated/0/Android/data/com.mojang.minecraftpe.nv/files/mods/BetterBrightness_Log.txt";
+    std::remove(path.c_str());
+    WriteDebugLog("--- BetterBrightness Booted ---");
 
     bool isLoaded = false;
     while (!isLoaded) {
@@ -108,25 +122,21 @@ void* InjectionThread(void* arg) {
         if (!isLoaded) usleep(10000); 
     }
 
-    LOGI("libminecraftpe.so mapped! Scanning memory instantly...");
+    WriteDebugLog("SUCCESS: libminecraftpe.so mapped. Scanning for pattern...");
 
     bool patchApplied = false;
     for (int attempts = 1; attempts <= 100; attempts++) {
         uintptr_t base = ResolveSignature(GFX_GAMMA_SIGNATURE);
         if (base != 0) {
-            LOGI("SUCCESS: Found Gamma signature at %lx", base);
+            WriteDebugLog("SUCCESS: Found Gamma signature at memory address: " + std::to_string(base));
             
-            // Verify we are patching the correct instructions
             if (*reinterpret_cast<uint32_t*>(base + OFFSET_FMOV) != 0x1E2E1002) {
-                LOGE("Verification failed: unexpected assembly instruction. Are you on 1.26.20?");
+                WriteDebugLog("FATAL: Verification failed! Assembly instruction at offset 16 did not match.");
             } else {
-                // Apply the Gamma Unlocks using W^X compliant mprotect
                 if (PatchMemory(reinterpret_cast<void*>(base + OFFSET_MOVK), MOV_W8_10) &&
                     PatchMemory(reinterpret_cast<void*>(base + OFFSET_FMOV), SCVTF_S2_W8)) {
-                    LOGI("SUCCESS: Patched Gamma limits! Night vision active.");
+                    WriteDebugLog("SUCCESS: Patched Gamma limits perfectly! Night vision should be active.");
                     patchApplied = true;
-                } else {
-                    LOGE("FATAL: Failed to patch memory.");
                 }
             }
             break; 
@@ -135,7 +145,7 @@ void* InjectionThread(void* arg) {
     }
 
     if (!patchApplied) {
-        LOGE("FATAL: Could not find BetterBrightness pattern in memory.");
+        WriteDebugLog("FATAL: Could not find BetterBrightness pattern in memory after 100 attempts.");
     }
 
     return nullptr;
