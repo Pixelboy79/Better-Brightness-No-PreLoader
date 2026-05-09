@@ -1,22 +1,11 @@
+#include "api/memory/Hook.h"
 #include <cstdint>
-#include <cstring>
-#include <sys/mman.h>
-#include <vector>
-#include <string>
-#include <pthread.h>
-#include <unistd.h>
 #include <android/log.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <filesystem>
-#include <fstream>
-#include <fcntl.h> // Required for opening memory files
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "BetterBrightness", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "BetterBrightness", __VA_ARGS__)
 
-namespace fs = std::filesystem;
-
+#if __aarch64__
 // --- 1.26.20 RenderDragon Gamma Signature ---
 static const char* GFX_GAMMA_SIGNATURE = "? ? ? 52 ? ? ? 2F ? ? ? 1E ? ? ? 72 ? ? ? 1E ? ? ? D1 03 01 27 1E ? ? ? D1 E0 03 15 AA ? ? ? 52 ? ? ? 52";
 
@@ -26,136 +15,42 @@ constexpr uint32_t SCVTF_S2_W8 = 0x1E220102;
 constexpr ptrdiff_t OFFSET_MOVK = 12;
 constexpr ptrdiff_t OFFSET_FMOV = 16;
 
-void WriteDebugLog(const std::string& message) {
-    std::string path = "/storage/emulated/0/Android/data/com.mojang.minecraftpe.nv/files/mods/BetterBrightness_Log.txt";
-    std::error_code ec;
-    fs::create_directories(fs::path(path).parent_path(), ec);
-    std::ofstream logFile(path, std::ios::app);
-    if (logFile.is_open()) {
-        logFile << message << "\n";
-        logFile.close();
-    }
-}
-
-// THE KERNEL BYPASS: Writing directly to the memory file
-static bool PatchMemory(void* addr, uint32_t insn) {
-    // Open the raw memory of the Minecraft app
-    int fd = open("/proc/self/mem", O_RDWR);
-    if (fd < 0) {
-        WriteDebugLog("ERROR: Could not open /proc/self/mem to bypass Android security.");
-        return false;
-    }
+void PatchGfxGamma() {
+    LOGI("Scanning for BetterBrightness signature...");
     
-    // Write our new assembly instructions directly to the exact memory address
-    ssize_t written = pwrite(fd, &insn, sizeof(insn), (off_t)addr);
-    close(fd);
+    // Resolve the signature using GlossHook's memory API
+    uintptr_t base = memory::resolveSignature("libminecraftpe.so", GFX_GAMMA_SIGNATURE);
     
-    if (written != sizeof(insn)) {
-        WriteDebugLog("ERROR: pwrite failed to overwrite memory at " + std::to_string((uintptr_t)addr));
-        return false;
+    if (base == 0) {
+        LOGE("FATAL: Could not find BetterBrightness pattern in memory.");
+        return;
     }
-    
-    // Flush the CPU cache so the game reads the new limits
-    __builtin___clear_cache((char*)addr, (char*)addr + sizeof(insn));
-    return true;
+
+    LOGI("SUCCESS: Found Gamma signature at %lx", base);
+
+    if (*reinterpret_cast<uint32_t*>(base + OFFSET_FMOV) != 0x1E2E1002) {
+        LOGE("FATAL: Verification failed! Assembly instruction at offset 16 did not match.");
+        return;
+    }
+
+    // Apply patches using GlossHook's built-in patcher
+    bool patch1 = memory::patchMemory(reinterpret_cast<void*>(base + OFFSET_MOVK), &MOV_W8_10, sizeof(MOV_W8_10));
+    bool patch2 = memory::patchMemory(reinterpret_cast<void*>(base + OFFSET_FMOV), &SCVTF_S2_W8, sizeof(SCVTF_S2_W8));
+
+    if (patch1 && patch2) {
+        LOGI("SUCCESS: Patched Gamma limits! Night vision active.");
+    } else {
+        LOGE("FATAL: GlossHook failed to apply the memory patch.");
+    }
 }
+#endif
 
-static uintptr_t ResolveSignature(const char* sig) {
-    std::vector<int> pattern;
-    const char* p = sig;
-    while (*p) {
-        if (*p == ' ') { p++; continue; }
-        if (*p == '?') { pattern.push_back(-1); p++; if(*p=='?') p++; continue; }
-        pattern.push_back(strtol(p, nullptr, 16));
-        p += 2;
-    }
-
-    FILE* fp = fopen("/proc/self/maps", "r");
-    if (!fp) return 0;
-
-    char line[512];
-    while (fgets(line, sizeof(line), fp)) {
-        if (!strstr(line, "libminecraftpe.so") || !strstr(line, "r-x")) continue; 
-        
-        uintptr_t start, end;
-        if (sscanf(line, "%lx-%lx", &start, &end) != 2) continue;
-
-        uint8_t* scan_base = (uint8_t*)start;
-        size_t size = end - start;
-        if (size < pattern.size()) continue;
-
-        for (size_t i = 0; i < size - pattern.size(); i++) {
-            bool found = true;
-            for (size_t j = 0; j < pattern.size(); j++) {
-                if (pattern[j] != -1 && scan_base[i + j] != pattern[j]) {
-                    found = false;
-                    break;
-                }
-            }
-            if (found) {
-                fclose(fp);
-                return (uintptr_t)(scan_base + i);
-            }
-        }
-    }
-    fclose(fp);
-    return 0;
-}
-
-void* InjectionThread(void* arg) {
-    std::string path = "/storage/emulated/0/Android/data/com.mojang.minecraftpe/files/mods/BetterBrightness_Log.txt";
-    std::remove(path.c_str());
-    WriteDebugLog("--- BetterBrightness Booted ---");
-
-    bool isLoaded = false;
-    while (!isLoaded) {
-        FILE* fp = fopen("/proc/self/maps", "r");
-        if (fp) {
-            char line[512];
-            while (fgets(line, sizeof(line), fp)) {
-                if (strstr(line, "libminecraftpe.so") && strstr(line, "r-x")) {
-                    isLoaded = true;
-                    break;
-                }
-            }
-            fclose(fp);
-        }
-        if (!isLoaded) usleep(10000); 
-    }
-
-    WriteDebugLog("SUCCESS: libminecraftpe.so mapped. Scanning for pattern...");
-
-    bool patchApplied = false;
-    for (int attempts = 1; attempts <= 100; attempts++) {
-        uintptr_t base = ResolveSignature(GFX_GAMMA_SIGNATURE);
-        if (base != 0) {
-            WriteDebugLog("SUCCESS: Found Gamma signature at memory address: " + std::to_string(base));
-            
-            if (*reinterpret_cast<uint32_t*>(base + OFFSET_FMOV) != 0x1E2E1002) {
-                WriteDebugLog("FATAL: Verification failed! Assembly instruction at offset 16 did not match.");
-            } else {
-                // Apply the Kernel memory bypass
-                if (PatchMemory(reinterpret_cast<void*>(base + OFFSET_MOVK), MOV_W8_10) &&
-                    PatchMemory(reinterpret_cast<void*>(base + OFFSET_FMOV), SCVTF_S2_W8)) {
-                    WriteDebugLog("SUCCESS: Patched Gamma limits perfectly using /proc/self/mem bypass!");
-                    patchApplied = true;
-                }
-            }
-            break; 
-        }
-        usleep(50000); 
-    }
-
-    if (!patchApplied) {
-        WriteDebugLog("FATAL: Could not apply memory patch.");
-    }
-
-    return nullptr;
-}
-
+// Initialization function called when the library is loaded
 __attribute__((constructor))
 void BetterBrightness_Init() {
-    pthread_t thread;
-    pthread_create(&thread, nullptr, InjectionThread, nullptr);
-    pthread_detach(thread);
+#if __aarch64__
+    PatchGfxGamma();
+#else
+    LOGE("BetterBrightness only supports ARM64 architecture.");
+#endif
 }
