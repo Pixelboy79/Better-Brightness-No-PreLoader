@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstring>
+#include <sys/mman.h>
 #include <vector>
 #include <string>
 #include <pthread.h>
@@ -7,7 +8,6 @@
 #include <android/log.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <dobby.h> // Using Dobby to bypass Android Memory Protection
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "BetterBrightness", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "BetterBrightness", __VA_ARGS__)
@@ -20,6 +20,30 @@ constexpr uint32_t SCVTF_S2_W8 = 0x1E220102;
 
 constexpr ptrdiff_t OFFSET_MOVK = 12;
 constexpr ptrdiff_t OFFSET_FMOV = 16;
+
+// Function to safely overwrite assembly instructions (W^X Compliant)
+static bool PatchMemory(void* addr, uint32_t insn) {
+    uintptr_t page_start = (uintptr_t)addr & ~(uintptr_t)4095;
+    size_t    page_size  = 4096; // Standard Android page size
+    
+    // 1. Give ourselves WRITE permission (but remove EXEC to bypass Android security)
+    if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE) != 0) {
+        LOGE("mprotect WRITE failed at %p", addr);
+        return false;
+    }
+    
+    // 2. Inject the new instructions
+    memcpy(addr, &insn, sizeof(insn));
+    __builtin___clear_cache((char*)addr, (char*)addr + sizeof(insn));
+    
+    // 3. Remove WRITE and restore EXEC permission so the game can run it
+    if (mprotect((void*)page_start, page_size, PROT_READ | PROT_EXEC) != 0) {
+        LOGE("mprotect EXEC failed at %p", addr);
+        return false;
+    }
+    
+    return true;
+}
 
 // Standalone memory scanner
 static uintptr_t ResolveSignature(const char* sig) {
@@ -94,14 +118,16 @@ void* InjectionThread(void* arg) {
             
             // Verify we are patching the correct instructions
             if (*reinterpret_cast<uint32_t*>(base + OFFSET_FMOV) != 0x1E2E1002) {
-                LOGE("Verification failed: unexpected assembly instruction at offset 16.");
+                LOGE("Verification failed: unexpected assembly instruction. Are you on 1.26.20?");
             } else {
-                // Apply the Gamma Unlocks using DobbyCodePatch safely
-                DobbyCodePatch(reinterpret_cast<void*>(base + OFFSET_MOVK), (uint8_t*)&MOV_W8_10, sizeof(MOV_W8_10));
-                DobbyCodePatch(reinterpret_cast<void*>(base + OFFSET_FMOV), (uint8_t*)&SCVTF_S2_W8, sizeof(SCVTF_S2_W8));
-                
-                LOGI("SUCCESS: Patched Gamma limits via Dobby! Night vision active.");
-                patchApplied = true;
+                // Apply the Gamma Unlocks using W^X compliant mprotect
+                if (PatchMemory(reinterpret_cast<void*>(base + OFFSET_MOVK), MOV_W8_10) &&
+                    PatchMemory(reinterpret_cast<void*>(base + OFFSET_FMOV), SCVTF_S2_W8)) {
+                    LOGI("SUCCESS: Patched Gamma limits! Night vision active.");
+                    patchApplied = true;
+                } else {
+                    LOGE("FATAL: Failed to patch memory.");
+                }
             }
             break; 
         }
