@@ -5,5 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_library(log-lib log)
+
+# CRITICAL FIX: Only compile main.cpp. Do NOT compile the GlossHook api folder!
 add_library(BetterBrightness SHARED src/main.cpp)
+
 target_link_libraries(BetterBrightness PRIVATE ${log-lib})
