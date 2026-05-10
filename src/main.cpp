@@ -1,3 +1,7 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <cstdint>
 #include <cstring>
 #include <sys/mman.h>
@@ -21,23 +25,42 @@ constexpr uint32_t SCVTF_S2_W8 = 0x1E220102;
 constexpr ptrdiff_t OFFSET_MOVK = 12;
 constexpr ptrdiff_t OFFSET_FMOV = 16;
 
-// --- EXACT PREVIOUS METHOD (Raw mprotect) ---
+// --- THE ULTIMATE SHADOW PAGE BYPASS ---
 static bool PatchMemory(void* addr, uint32_t insn) {
     uintptr_t page_start = (uintptr_t)addr & ~(uintptr_t)4095;
-    size_t    page_size  = (sizeof(insn) + 4095) & ~(size_t)4095;
+    size_t    page_size  = 4096; // Standard 4KB page
     
-    // Request Read/Write/Execute all at once (The 1.26.10 way)
-    if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        LOGE("mprotect failed to unlock memory!");
+    // 1. Create a dummy "shadow" page with Read/Write access
+    void* shadow_page = mmap(NULL, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (shadow_page == MAP_FAILED) {
+        LOGE("mmap failed to create shadow page.");
         return false;
     }
     
-    // Inject the new bytes
-    memcpy(addr, &insn, sizeof(insn));
-    __builtin___clear_cache((char*)addr, (char*)addr + sizeof(insn));
+    // 2. Copy the original game memory into our shadow page
+    memcpy(shadow_page, (void*)page_start, page_size);
     
-    // Lock it back
-    mprotect((void*)page_start, page_size, PROT_READ | PROT_EXEC);
+    // 3. Inject our Night Vision bytes into the shadow page
+    uintptr_t offset = (uintptr_t)addr - page_start;
+    memcpy((void*)((uintptr_t)shadow_page + offset), &insn, sizeof(insn));
+    
+    // 4. Change our shadow page to Read/Execute
+    if (mprotect(shadow_page, page_size, PROT_READ | PROT_EXEC) != 0) {
+        LOGE("mprotect failed on shadow page.");
+        munmap(shadow_page, page_size);
+        return false;
+    }
+    
+    // 5. THE MAGIC TRICK: Remap the shadow page directly over the real game page
+    void* result = mremap(shadow_page, page_size, page_size, MREMAP_MAYMOVE | MREMAP_FIXED, (void*)page_start);
+    if (result == MAP_FAILED) {
+        LOGE("mremap bypass blocked by kernel!");
+        return false;
+    }
+    
+    // Flush the CPU cache so the game starts reading our new page
+    __builtin___clear_cache((char*)addr, (char*)addr + sizeof(insn));
+    LOGI("Shadow Page successfully swapped! SELinux bypassed.");
     return true;
 }
 
