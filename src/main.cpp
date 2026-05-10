@@ -1,7 +1,3 @@
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
-
 #include <cstdint>
 #include <cstring>
 #include <sys/mman.h>
@@ -25,42 +21,24 @@ constexpr uint32_t SCVTF_S2_W8 = 0x1E220102;
 constexpr ptrdiff_t OFFSET_MOVK = 12;
 constexpr ptrdiff_t OFFSET_FMOV = 16;
 
-// --- THE ULTIMATE SHADOW PAGE BYPASS ---
+// --- PRELOAD MPROTECT PATCHER ---
 static bool PatchMemory(void* addr, uint32_t insn) {
     uintptr_t page_start = (uintptr_t)addr & ~(uintptr_t)4095;
-    size_t    page_size  = 4096; // Standard 4KB page
+    size_t    page_size  = (sizeof(insn) + 4095) & ~(size_t)4095;
     
-    // 1. Create a dummy "shadow" page with Read/Write access
-    void* shadow_page = mmap(NULL, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (shadow_page == MAP_FAILED) {
-        LOGE("mmap failed to create shadow page.");
+    // Because we are loaded via Patchelf, the OS hasn't locked the doors yet.
+    // We can safely ask for Read/Write/Execute permissions!
+    if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        LOGE("mprotect failed! Android locked the memory too fast.");
         return false;
     }
     
-    // 2. Copy the original game memory into our shadow page
-    memcpy(shadow_page, (void*)page_start, page_size);
-    
-    // 3. Inject our Night Vision bytes into the shadow page
-    uintptr_t offset = (uintptr_t)addr - page_start;
-    memcpy((void*)((uintptr_t)shadow_page + offset), &insn, sizeof(insn));
-    
-    // 4. Change our shadow page to Read/Execute
-    if (mprotect(shadow_page, page_size, PROT_READ | PROT_EXEC) != 0) {
-        LOGE("mprotect failed on shadow page.");
-        munmap(shadow_page, page_size);
-        return false;
-    }
-    
-    // 5. THE MAGIC TRICK: Remap the shadow page directly over the real game page
-    void* result = mremap(shadow_page, page_size, page_size, MREMAP_MAYMOVE | MREMAP_FIXED, (void*)page_start);
-    if (result == MAP_FAILED) {
-        LOGE("mremap bypass blocked by kernel!");
-        return false;
-    }
-    
-    // Flush the CPU cache so the game starts reading our new page
+    // Overwrite the darkness limits
+    memcpy(addr, &insn, sizeof(insn));
     __builtin___clear_cache((char*)addr, (char*)addr + sizeof(insn));
-    LOGI("Shadow Page successfully swapped! SELinux bypassed.");
+    
+    // Restore safe permissions
+    mprotect((void*)page_start, page_size, PROT_READ | PROT_EXEC);
     return true;
 }
 
@@ -107,8 +85,9 @@ static uintptr_t ResolveSignature(const char* sig) {
 }
 
 void* InjectionThread(void* arg) {
-    LOGI("BetterBrightness Booted.");
+    LOGI("BetterBrightness Patchelf Preloader Booted.");
 
+    // Wait for the OS to finish loading the game engine into memory
     bool isLoaded = false;
     while (!isLoaded) {
         FILE* fp = fopen("/proc/self/maps", "r");
@@ -131,12 +110,14 @@ void* InjectionThread(void* arg) {
         if (base != 0) {
             LOGI("Found Gamma signature at %lx", base);
             
+            // Verify offset
             if (*reinterpret_cast<uint32_t*>(base + OFFSET_FMOV) != 0x1E2E1002) {
                 LOGE("Verification failed! Offset 16 did not match.");
             } else {
+                // Apply the patch
                 if (PatchMemory(reinterpret_cast<void*>(base + OFFSET_MOVK), MOV_W8_10) &&
                     PatchMemory(reinterpret_cast<void*>(base + OFFSET_FMOV), SCVTF_S2_W8)) {
-                    LOGI("SUCCESS! Night vision active.");
+                    LOGI("SUCCESS! Night vision active via Patchelf!");
                     patchApplied = true;
                 }
             }
