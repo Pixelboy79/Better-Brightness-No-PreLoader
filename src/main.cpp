@@ -3,7 +3,6 @@
 #include <sys/mman.h>
 #include <vector>
 #include <string>
-#include <pthread.h>
 #include <unistd.h>
 #include <android/log.h>
 #include <stdio.h>
@@ -12,7 +11,6 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "BetterBrightness", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "BetterBrightness", __VA_ARGS__)
 
-// --- 1.26.20 RenderDragon Gamma Signature ---
 static const char* GFX_GAMMA_SIGNATURE = "? ? ? 52 ? ? ? 2F ? ? ? 1E ? ? ? 72 ? ? ? 1E ? ? ? D1 03 01 27 1E ? ? ? D1 E0 03 15 AA ? ? ? 52 ? ? ? 52";
 
 constexpr uint32_t MOV_W8_10   = 0x52800148;
@@ -21,30 +19,22 @@ constexpr uint32_t SCVTF_S2_W8 = 0x1E220102;
 constexpr ptrdiff_t OFFSET_MOVK = 12;
 constexpr ptrdiff_t OFFSET_FMOV = 16;
 
-// --- PRELOAD MPROTECT PATCHER ---
 static bool PatchMemory(void* addr, uint32_t insn) {
     uintptr_t page_start = (uintptr_t)addr & ~(uintptr_t)4095;
     size_t    page_size  = (sizeof(insn) + 4095) & ~(size_t)4095;
     
-    // Because we are loaded via Patchelf, the OS hasn't locked the doors yet.
-    // We can safely ask for Read/Write/Execute permissions!
-    if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        LOGE("mprotect failed! Android locked the memory too fast.");
-        return false;
-    }
+    if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) return false;
     
-    // Overwrite the darkness limits
     memcpy(addr, &insn, sizeof(insn));
     __builtin___clear_cache((char*)addr, (char*)addr + sizeof(insn));
     
-    // Restore safe permissions
     mprotect((void*)page_start, page_size, PROT_READ | PROT_EXEC);
     return true;
 }
 
-static uintptr_t ResolveSignature(const char* sig) {
+static uintptr_t ResolveSignature() {
     std::vector<int> pattern;
-    const char* p = sig;
+    const char* p = GFX_GAMMA_SIGNATURE;
     while (*p) {
         if (*p == ' ') { p++; continue; }
         if (*p == '?') { pattern.push_back(-1); p++; if(*p=='?') p++; continue; }
@@ -84,58 +74,25 @@ static uintptr_t ResolveSignature(const char* sig) {
     return 0;
 }
 
-void* InjectionThread(void* arg) {
-    LOGI("BetterBrightness Patchelf Preloader Booted.");
-
-    // Wait for the OS to finish loading the game engine into memory
-    bool isLoaded = false;
-    while (!isLoaded) {
-        FILE* fp = fopen("/proc/self/maps", "r");
-        if (fp) {
-            char line[512];
-            while (fgets(line, sizeof(line), fp)) {
-                if (strstr(line, "libminecraftpe.so") && strstr(line, "r-x")) {
-                    isLoaded = true;
-                    break;
-                }
-            }
-            fclose(fp);
-        }
-        if (!isLoaded) usleep(10000); 
-    }
-
-    bool patchApplied = false;
-    for (int attempts = 1; attempts <= 100; attempts++) {
-        uintptr_t base = ResolveSignature(GFX_GAMMA_SIGNATURE);
-        if (base != 0) {
-            LOGI("Found Gamma signature at %lx", base);
-            
-            // Verify offset
-            if (*reinterpret_cast<uint32_t*>(base + OFFSET_FMOV) != 0x1E2E1002) {
-                LOGE("Verification failed! Offset 16 did not match.");
-            } else {
-                // Apply the patch
-                if (PatchMemory(reinterpret_cast<void*>(base + OFFSET_MOVK), MOV_W8_10) &&
-                    PatchMemory(reinterpret_cast<void*>(base + OFFSET_FMOV), SCVTF_S2_W8)) {
-                    LOGI("SUCCESS! Night vision active via Patchelf!");
-                    patchApplied = true;
-                }
-            }
-            break; 
-        }
-        usleep(50000); 
-    }
-
-    if (!patchApplied) {
-        LOGE("Failed to apply memory patch.");
-    }
-
-    return nullptr;
-}
-
+// NO BACKGROUND THREAD. We freeze the boot until it patches.
 __attribute__((constructor))
 void BetterBrightness_Init() {
-    pthread_t thread;
-    pthread_create(&thread, nullptr, InjectionThread, nullptr);
-    pthread_detach(thread);
+    LOGI("BetterBrightness Synchronous Patcher Booted.");
+    
+    // The linker loads this before libminecraftpe.so can initialize.
+    // We do a fast loop to ensure the engine is mapped, patch it, and let it boot.
+    for (int attempts = 0; attempts < 100; attempts++) {
+        uintptr_t base = ResolveSignature();
+        if (base != 0) {
+            if (*reinterpret_cast<uint32_t*>(base + OFFSET_FMOV) == 0x1E2E1002) {
+                if (PatchMemory(reinterpret_cast<void*>(base + OFFSET_MOVK), MOV_W8_10) &&
+                    PatchMemory(reinterpret_cast<void*>(base + OFFSET_FMOV), SCVTF_S2_W8)) {
+                    LOGI("SUCCESS! Night vision patched BEFORE RenderDragon could read it!");
+                    return; // Patch complete, allow the game to boot!
+                }
+            }
+        }
+        usleep(10000); // Wait 10ms for the linker to map the memory
+    }
+    LOGE("Failed to find signature during boot block.");
 }
